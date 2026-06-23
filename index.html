@@ -281,6 +281,57 @@ async function ensureUserDoc(user){
   }
 }
 
+// ══════════════════════════════════════════════════════════
+// SURVEILLANCE TEMPS RÉEL DE liveOpen (indépendante de la connexion)
+// Tourne en permanence dès le chargement de la page, sur TOUS les
+// appareils (ordi, mobile, connecté ou pas), pour que l'ouverture/
+// fermeture du live décidée par l'admin soit reflétée immédiatement,
+// sans avoir besoin de recharger la page.
+// ══════════════════════════════════════════════════════════
+function updateLoginLiveStatus(){
+  const dot    = document.getElementById('loginLiveDot');
+  const status = document.getElementById('loginLiveStatus');
+  if(dot){
+    dot.style.background = ST.liveOpen ? '#28e070' : '#ff4444';
+  }
+  if(status){
+    status.textContent = ST.liveOpen
+      ? '🟢 Live en cours — cliquez pour suivre'
+      : '🔴 Live pas encore ouvert par l\'organisation';
+    status.style.color = ST.liveOpen ? '#7affa0' : '#ffb0b0';
+  }
+}
+function handleLiveOpenChange(){
+  updateLoginLiveStatus();
+  if(typeof updateLiveToggleBtn==='function') updateLiveToggleBtn();
+  const overlay = document.getElementById('liveClosedOverlay');
+  // Le live vient de s'ouvrir : si un spectateur patientait sur l'overlay
+  // "live fermé", on referme automatiquement l'overlay (pas besoin de recliquer).
+  if(ST.liveOpen && overlay && overlay.style.display==='flex'){
+    overlay.style.display='none';
+  }
+  // Le live vient de se fermer alors qu'un spectateur (non inscrit) est en
+  // train de le regarder : on le ramène vers l'écran "live fermé".
+  if(!ST.liveOpen && USER_ROLE==='spectator' && !CURRENT_USER){
+    document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+    if(overlay) overlay.style.display='flex';
+  }
+}
+let _liveOpenWatcherStarted = false;
+function startGlobalLiveOpenWatcher(){
+  if(_liveOpenWatcherStarted) return;
+  _liveOpenWatcherStarted = true;
+  onSnapshot(doc(db,'foottournoi','current'), (snap)=>{
+    const wasOpen = ST.liveOpen;
+    ST.liveOpen = snap.exists() ? snap.data().liveOpen === true : false;
+    if(wasOpen !== ST.liveOpen) handleLiveOpenChange();
+    else updateLoginLiveStatus();
+  }, (err)=>{
+    console.warn('Surveillance liveOpen indisponible (réseau/permissions) :', err);
+  });
+}
+startGlobalLiveOpenWatcher();
+
 onAuthStateChanged(auth, async (user)=>{
   if(USER_ROLE === 'spectator' && !user) return;
   if(user){
@@ -2473,10 +2524,11 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
     <!-- ══ ZONE SPECTATEURS ══ -->
     <div style="background:linear-gradient(135deg,#0d3a1a,#0f5a28);border-radius:14px;padding:18px 16px;margin-bottom:18px;border:2px solid rgba(100,255,150,.3)">
       <div style="font-family:'Oswald',sans-serif;font-size:22px;font-weight:700;letter-spacing:1.5px;color:#7affa0;text-align:center;margin-bottom:4px;text-transform:uppercase">👁 Accès Spectateur</div>
-      <div style="font-size:12px;color:rgba(180,255,200,.7);text-align:center;margin-bottom:14px">Suivez le tournoi en temps réel — sans inscription</div>
+      <div style="font-size:12px;color:rgba(180,255,200,.7);text-align:center;margin-bottom:6px">Suivez le tournoi en temps réel — sans inscription</div>
+      <div id="loginLiveStatus" style="font-size:11px;font-weight:700;text-align:center;margin-bottom:10px;letter-spacing:.5px">⏳ Vérification du live…</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
         <button onclick="enterLiveModeAndGo(4)" style="padding:16px 8px;background:linear-gradient(135deg,#1a6a3a,#159050);border:2px solid #40e090;border-radius:10px;color:#fff;font-family:'Oswald',sans-serif;font-size:18px;letter-spacing:.8px;cursor:pointer;text-transform:uppercase;display:flex;align-items:center;justify-content:center;gap:7px;font-weight:700">
-          <span class="spec-nav-live-dot"></span> LIVE
+          <span class="spec-nav-live-dot" id="loginLiveDot"></span> LIVE
         </button>
         <button onclick="enterLiveModeAndGo(5)" style="padding:16px 8px;background:linear-gradient(135deg,#4a3200,#8a6010);border:2px solid #d4a030;border-radius:10px;color:#ffd080;font-family:'Oswald',sans-serif;font-size:18px;letter-spacing:.8px;cursor:pointer;text-transform:uppercase;display:flex;align-items:center;justify-content:center;gap:7px;font-weight:700">
           🏆 CLASSEMENT
