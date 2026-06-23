@@ -243,7 +243,17 @@ function bracketLabel(m){
 // ══════════════════════════════════════════════════════════
 // AUTH
 // ══════════════════════════════════════════════════════════
-async function getUserProfile(uid){
+// Comptes admin reconnus en dur — DOIT rester identique à la liste codée
+// dans isAdmin() des règles Firestore (firestore.rules). Sans ce miroir,
+// un compte Google admin légitime (autorisé à écrire côté Firestore) se
+// retrouvait quand même affiché en spectateur côté client si son document
+// users/{uid} n'avait pas explicitement role:'admin'.
+const HARDCODED_ADMIN_EMAILS = ['checheux@gmail.com', 'bracket.organizer@gmail.com'];
+
+async function getUserProfile(uid, email){
+  if(email && HARDCODED_ADMIN_EMAILS.includes(email)){
+    return { role:'admin', teamId:null };
+  }
   try {
     const snap = await getDoc(doc(db,'users',uid));
     if(snap.exists()){
@@ -272,7 +282,7 @@ async function ensureUserDoc(user){
       await setDoc(ref,{
         email: user.email,
         name:  user.displayName || user.email.split('@')[0],
-        role:  'spectator',
+        role:  HARDCODED_ADMIN_EMAILS.includes(user.email) ? 'admin' : 'spectator',
         createdAt: serverTimestamp()
       });
     }
@@ -286,7 +296,7 @@ onAuthStateChanged(auth, async (user)=>{
   if(user){
     CURRENT_USER = user;
     await ensureUserDoc(user);
-    const profile = await getUserProfile(user.uid);
+    const profile = await getUserProfile(user.uid, user.email);
     USER_ROLE = profile.role;
     MANAGER_TEAM_ID = profile.teamId;
     if(USER_ROLE === 'spectator'){
