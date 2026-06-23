@@ -1,1 +1,1 @@
-# Tournoi-V-t-rans-UST
+# Tournoi-Veterans-UST
