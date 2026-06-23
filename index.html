@@ -364,7 +364,13 @@ function showAuthMsg(msg,color){
 
 let pendingSpecTarget = null; // cible demandée par un visiteur en attente que le live s'ouvre
 
-window.enterLiveModeAndGo = function(target){
+window.enterLiveModeAndGo = async function(target){
+  // Même logique que spectatorGoLive : relecture fraîche avant de vérifier
+  // liveOpen, pour ne pas rester bloqué sur un état périmé (listener lent).
+  try {
+    const snap = await getDoc(doc(db,'foottournoi','current'));
+    if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+  } catch(e){ console.warn('enterLiveModeAndGo: relecture liveOpen échouée', e); }
   if(target !== 'R' && !ST.liveOpen){
     pendingSpecTarget = target;
     const overlay = document.getElementById('liveClosedOverlay');
@@ -1171,7 +1177,15 @@ window.goTo = function(n){
   if(n===4) renderTournamentPage();
   if(n===5) renderFinalPage();
 };
-window.spectatorGoLive = function(n){
+window.spectatorGoLive = async function(n){
+  // Forcer une lecture Firestore fraîche avant de vérifier liveOpen :
+  // le listener onSnapshot peut avoir du retard sur mobile (OS suspend la
+  // connexion WebSocket en veille). Ce getDoc garantit qu'on a l'état réel
+  // au moment du tap, sans attendre la prochaine notification du listener.
+  try {
+    const snap = await getDoc(doc(db,'foottournoi','current'));
+    if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+  } catch(e){ console.warn('spectatorGoLive: relecture liveOpen échouée', e); }
   if(n!=='R' && isLiveBlocked()){
     pendingSpecTarget = n;
     const overlay = document.getElementById('liveClosedOverlay');
@@ -1211,9 +1225,16 @@ window.toggleAdminPanel = function(){
 };
 window.toggleLiveOpen = async function(){
   if(!isAdmin()) return;
-  ST.liveOpen = !ST.liveOpen;
-  await saveTournament({ liveOpen: ST.liveOpen });
-  updateLiveToggleBtn();
+  const newVal = !ST.liveOpen;
+  await saveTournament({ liveOpen: newVal });
+  // On ne modifie pas ST.liveOpen ici : handleLiveOpenChange() sera appelé
+  // par le onSnapshot en retour, ce qui met à jour ST.liveOpen et le bouton
+  // de façon cohérente sur tous les appareils (y compris celui de l'admin).
+  // Pour éviter un délai perçu côté admin, on lit immédiatement depuis Firestore.
+  try {
+    const snap = await getDoc(doc(db,'foottournoi','current'));
+    if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+  } catch(e){ handleLiveOpenChange(newVal); } // fallback si réseau KO
 };
 function updateLiveToggleBtn(){
   const btn=document.getElementById('liveToggleBtn');
