@@ -449,7 +449,13 @@ function startLiveWatch(){
   unsubLiveWatch = onSnapshot(doc(db,'foottournoi','current'), (snap)=>{
     if(!snap.exists()) return;
     handleLiveOpenChange(snap.data().liveOpen === true);
-  }, (e)=>{ console.warn('startLiveWatch', e); });
+  }, (e)=>{
+    // Une erreur 'permission-denied' signifie que liveOpen vient de passer à
+    // false : les règles Firestore bloquent désormais la lecture pour un
+    // visiteur non authentifié. On traite ça comme une fermeture du live.
+    if(e.code === 'permission-denied') handleLiveOpenChange(false);
+    else console.warn('startLiveWatch', e);
+  });
 }
 startLiveWatch();
 
@@ -492,6 +498,18 @@ function subscribeToTournament(){
     if(data.phase)           ST.phase           = data.phase;
     handleLiveOpenChange(data.liveOpen === true);
     refreshCurrentPage();
+  }, (e)=>{
+    // Erreur 'permission-denied' = liveOpen vient de passer à false (règles
+    // Firestore bloquent la lecture pour un spectateur non-admin). On traite
+    // ça comme une fermeture du live et on bascule vers startLiveWatch pour
+    // continuer à surveiller la réouverture éventuelle.
+    if(e.code === 'permission-denied'){
+      handleLiveOpenChange(false);
+      unsubTournament = null;
+      startLiveWatch();
+    } else {
+      console.warn('subscribeToTournament', e);
+    }
   });
 }
 async function saveTournament(partial){
