@@ -325,8 +325,8 @@ onAuthStateChanged(auth, async (user)=>{
 function unsubAll(){
   if(unsubTournament){ unsubTournament(); unsubTournament=null; }
   if(unsubRoster){ unsubRoster(); unsubRoster=null; }
-  if(unsubLiveWatch){ unsubLiveWatch(); unsubLiveWatch=null; }
-  startLiveWatch(); // ré-arme le suivi sur foottournoi/status pour l'écran de login
+  stopLiveWatch(); // coupe listener + polling
+  startLiveWatch(); // ré-arme pour l'écran de login
 }
 
 window.loginEmail = async function(){
@@ -445,16 +445,33 @@ function handleLiveOpenChange(nowOpen){
 }
 
 let unsubLiveWatch = null;
+let liveWatchIv = null; // polling de secours (mobile en veille)
+
 function startLiveWatch(){
-  if(unsubLiveWatch) return; // déjà actif (ex: via subscribeToTournament)
-  // On écoute foottournoi/STATUS (toujours lisible publiquement, même quand
-  // liveOpen=false) plutôt que foottournoi/current (protégé par les règles
-  // Firestore dès que liveOpen=false). Cela garantit que la fermeture du live
-  // est bien reçue par les spectateurs sans erreur de permission.
+  if(unsubLiveWatch) return; // déjà actif
+  // Listener temps réel sur foottournoi/status (toujours lisible publiquement).
   unsubLiveWatch = onSnapshot(doc(db,'foottournoi','status'), (snap)=>{
     if(!snap.exists()) return;
     handleLiveOpenChange(snap.data().liveOpen === true);
   }, (e)=>{ console.warn('startLiveWatch', e); });
+
+  // Polling de secours toutes les 4 secondes : sur mobile, le navigateur peut
+  // suspendre le WebSocket Firestore sans déclencher visibilitychange. Le
+  // polling garantit que la fermeture/ouverture du live est détectée même dans
+  // ce cas, sans attendre que l'utilisateur touche l'écran.
+  if(!liveWatchIv){
+    liveWatchIv = setInterval(async ()=>{
+      try {
+        const snap = await getDoc(doc(db,'foottournoi','status'));
+        if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+      } catch(e){ /* silencieux : réseau indisponible */ }
+    }, 4000);
+  }
+}
+
+function stopLiveWatch(){
+  if(unsubLiveWatch){ unsubLiveWatch(); unsubLiveWatch=null; }
+  if(liveWatchIv){ clearInterval(liveWatchIv); liveWatchIv=null; }
 }
 startLiveWatch();
 
@@ -480,11 +497,10 @@ document.addEventListener('visibilitychange', async ()=>{
 // PERSISTANCE FIRESTORE — doc unique 'foottournoi/current'
 // ══════════════════════════════════════════════════════════
 function subscribeToTournament(){
-  // startLiveWatch reste actif en parallèle sur foottournoi/status (toujours
-  // lisible) pour détecter la fermeture du live même si foottournoi/current
-  // devient illisible (permission-denied quand liveOpen=false).
-  // On NE coupe plus unsubLiveWatch ici — les deux listeners coexistent.
-  if(!unsubLiveWatch) startLiveWatch();
+  // startLiveWatch (listener + polling) reste actif en parallèle sur
+  // foottournoi/status pour détecter la fermeture du live même quand
+  // foottournoi/current devient illisible (liveOpen=false).
+  if(!unsubLiveWatch || !liveWatchIv) startLiveWatch();
   unsubTournament = onSnapshot(doc(db,'foottournoi','current'), (snap)=>{
     if(!snap.exists()) return;
     const data=snap.data();
