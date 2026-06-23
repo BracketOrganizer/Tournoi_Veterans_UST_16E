@@ -325,7 +325,8 @@ onAuthStateChanged(auth, async (user)=>{
 function unsubAll(){
   if(unsubTournament){ unsubTournament(); unsubTournament=null; }
   if(unsubRoster){ unsubRoster(); unsubRoster=null; }
-  startLiveWatch(); // ré-arme le suivi léger pour l'écran de login
+  if(unsubLiveWatch){ unsubLiveWatch(); unsubLiveWatch=null; }
+  startLiveWatch(); // ré-arme le suivi sur foottournoi/status pour l'écran de login
 }
 
 window.loginEmail = async function(){
@@ -446,16 +447,14 @@ function handleLiveOpenChange(nowOpen){
 let unsubLiveWatch = null;
 function startLiveWatch(){
   if(unsubLiveWatch) return; // déjà actif (ex: via subscribeToTournament)
-  unsubLiveWatch = onSnapshot(doc(db,'foottournoi','current'), (snap)=>{
+  // On écoute foottournoi/STATUS (toujours lisible publiquement, même quand
+  // liveOpen=false) plutôt que foottournoi/current (protégé par les règles
+  // Firestore dès que liveOpen=false). Cela garantit que la fermeture du live
+  // est bien reçue par les spectateurs sans erreur de permission.
+  unsubLiveWatch = onSnapshot(doc(db,'foottournoi','status'), (snap)=>{
     if(!snap.exists()) return;
     handleLiveOpenChange(snap.data().liveOpen === true);
-  }, (e)=>{
-    // Une erreur 'permission-denied' signifie que liveOpen vient de passer à
-    // false : les règles Firestore bloquent désormais la lecture pour un
-    // visiteur non authentifié. On traite ça comme une fermeture du live.
-    if(e.code === 'permission-denied') handleLiveOpenChange(false);
-    else console.warn('startLiveWatch', e);
-  });
+  }, (e)=>{ console.warn('startLiveWatch', e); });
 }
 startLiveWatch();
 
@@ -469,8 +468,10 @@ startLiveWatch();
 // ══════════════════════════════════════════════════════════
 document.addEventListener('visibilitychange', async ()=>{
   if(document.visibilityState !== 'visible') return;
+  // On lit foottournoi/status (toujours lisible) pour détecter liveOpen,
+  // même si current est illisible pour un spectateur quand liveOpen=false.
   try {
-    const snap = await getDoc(doc(db,'foottournoi','current'));
+    const snap = await getDoc(doc(db,'foottournoi','status'));
     if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
   } catch(e){ console.warn('resync visibilitychange', e); }
 });
@@ -479,9 +480,11 @@ document.addEventListener('visibilitychange', async ()=>{
 // PERSISTANCE FIRESTORE — doc unique 'foottournoi/current'
 // ══════════════════════════════════════════════════════════
 function subscribeToTournament(){
-  // Le listener complet prend le relais : on coupe le listener léger
-  // startLiveWatch pour ne pas avoir deux abonnements actifs sur le même doc.
-  if(unsubLiveWatch){ unsubLiveWatch(); unsubLiveWatch=null; }
+  // startLiveWatch reste actif en parallèle sur foottournoi/status (toujours
+  // lisible) pour détecter la fermeture du live même si foottournoi/current
+  // devient illisible (permission-denied quand liveOpen=false).
+  // On NE coupe plus unsubLiveWatch ici — les deux listeners coexistent.
+  if(!unsubLiveWatch) startLiveWatch();
   unsubTournament = onSnapshot(doc(db,'foottournoi','current'), (snap)=>{
     if(!snap.exists()) return;
     const data=snap.data();
@@ -498,23 +501,19 @@ function subscribeToTournament(){
     if(data.phase)           ST.phase           = data.phase;
     handleLiveOpenChange(data.liveOpen === true);
     refreshCurrentPage();
-  }, (e)=>{
-    // Erreur 'permission-denied' = liveOpen vient de passer à false (règles
-    // Firestore bloquent la lecture pour un spectateur non-admin). On traite
-    // ça comme une fermeture du live et on bascule vers startLiveWatch pour
-    // continuer à surveiller la réouverture éventuelle.
-    if(e.code === 'permission-denied'){
-      handleLiveOpenChange(false);
-      unsubTournament = null;
-      startLiveWatch();
-    } else {
-      console.warn('subscribeToTournament', e);
-    }
-  });
+  }, (e)=>{ console.warn('subscribeToTournament', e); });
 }
 async function saveTournament(partial){
   if(!isAdmin() && !isScorer()) return;
-  try { await setDoc(doc(db,'foottournoi','current'), { ...partial, updatedAt: serverTimestamp() }, { merge:true }); }
+  try {
+    await setDoc(doc(db,'foottournoi','current'), { ...partial, updatedAt: serverTimestamp() }, { merge:true });
+    // Si liveOpen est dans la mise à jour, on le duplique dans foottournoi/status
+    // (document toujours lisible publiquement) pour que les spectateurs reçoivent
+    // la fermeture du live même quand current devient illisible pour eux.
+    if('liveOpen' in partial){
+      await setDoc(doc(db,'foottournoi','status'), { liveOpen: partial.liveOpen }, { merge:true });
+    }
+  }
   catch(e){ console.error('saveTournament', e); alert('Erreur de sauvegarde : '+e.message); }
 }
 function refreshCurrentPage(){
