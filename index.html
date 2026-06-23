@@ -410,6 +410,23 @@ function handleLiveOpenChange(nowOpen){
   const wasOpen = ST.liveOpen;
   ST.liveOpen = nowOpen;
   updateLiveToggleBtn(); // reflète le nouvel état sur le bouton du panneau admin, sur tous les appareils
+
+  // ── Fermeture du live : renvoyer les spectateurs sur l'overlay ──────────
+  // Si le live passe de ouvert à fermé ET que l'utilisateur courant est un
+  // spectateur (ou visiteur sans compte), on affiche l'overlay "live fermé"
+  // par-dessus l'app. Les admins/scorers/managers ne sont pas affectés.
+  if(wasOpen && !ST.liveOpen){
+    const appScreen = document.getElementById('appScreen');
+    const isInApp = appScreen && appScreen.style.display !== 'none';
+    if(isInApp && (USER_ROLE === 'spectator' || USER_ROLE === null)){
+      const overlay = document.getElementById('liveClosedOverlay');
+      if(overlay) overlay.style.display = 'flex';
+      pendingSpecTarget = typeof ST.page === 'number' ? ST.page : 4; // mémorise pour ré-ouvrir au même endroit
+    }
+    return;
+  }
+
+  // ── Ouverture du live : débloquer un spectateur en attente ──────────────
   if(!wasOpen && ST.liveOpen && pendingSpecTarget !== null){
     const overlay = document.getElementById('liveClosedOverlay');
     if(overlay) overlay.style.display = 'none';
