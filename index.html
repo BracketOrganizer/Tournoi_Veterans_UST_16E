@@ -1350,13 +1350,24 @@ window.createStaffAccount = async function(){
     const newUid = cred.user.uid;
     await updateProfile(cred.user, { displayName: name });
 
-    // 2. Crée la fiche Firestore avec le rôle choisi (+ teamId + tournament si manager)
-    const userDoc = { email, name, role, createdAt: serverTimestamp(), createdBy: adminEmail };
-    if(role==='manager'){ userDoc.teamId = teamId; userDoc.tournament = 'foot16'; }
-    await setDoc(doc(db,'users',newUid), userDoc);
+    // 2. Crée la fiche Firestore en 'spectator' uniquement — c'est le SEUL rôle
+    // qu'un compte est autorisé à s'auto-attribuer à la création (règle Firestore).
+    // On ne peut pas écrire directement le rôle choisi ici : à ce stade, c'est le
+    // NOUVEAU compte qui est connecté (request.auth.uid == newUid), pas l'admin.
+    await setDoc(doc(db,'users',newUid), {
+      email, name, role:'spectator', createdAt: serverTimestamp(), createdBy: adminEmail
+    });
 
     // 3. Reconnecte l'admin avec son propre mot de passe
     await signInWithEmailAndPassword(auth, adminEmail, adminPwd);
+
+    // 4. Maintenant reconnecté en admin : promeut le compte au rôle choisi via
+    // update (autorisé par la règle Firestore uniquement pour un admin).
+    if(role !== 'spectator'){
+      const patch = { role };
+      if(role==='manager'){ patch.teamId = teamId; patch.tournament = 'foot16'; }
+      await updateDoc(doc(db,'users',newUid), patch);
+    }
 
     setMsg(`✓ Compte staff créé pour ${name} (${roleBadge(role)}${role==='manager'?' — '+tName(teamId):''}). Vous êtes reconnecté en admin.`,'grn');
     document.getElementById('newStaffName').value='';
