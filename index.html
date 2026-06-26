@@ -66,7 +66,8 @@ let unsubRoster = null;
 let tvCycleIv = null;   // intervalle d'alternance Résultats/Classement en mode Écran
 let tvClockIv = null;   // intervalle de mise à jour de l'horloge en mode Écran
 let tvScrollIv = null;  // intervalle du défilement automatique en mode Écran
-let tvActiveSub = 'results'; // sous-vue actuellement affichée en mode Écran : 'results' | 'standings'
+let tvScreenIndex = 0;  // index de l'écran actuellement affiché parmi les écrans disponibles (mode Écran)
+let tvLastPhase = null; // dernière phase connue, pour repartir au 1er écran si poules→finale
 
 const ST = {
   page:1, prevPage:1, rulesOpen:false,
@@ -951,14 +952,39 @@ function bracketTeam(m, side){
   return null;
 }
 
+// Désactive et étiquette le bouton "Générer la phase finale" tant qu'il
+// reste des matchs de poules sans résultat — évite à l'admin de cliquer
+// pour se heurter au blocage dans generateBracket().
+function updateGenerateBracketBtn(){
+  const btn = document.getElementById('genBracketBtn'); if(!btn) return;
+  const missing = ['A','B','C','D'].reduce((sum,p)=>{
+    const matches = ST.poolSchedule.filter(m=>m.pool===p);
+    return sum + matches.filter(m=>{ const r=getPoolResult(m.matchId); return !(r.ga!==''&&r.gb!=='') ; }).length;
+  }, 0);
+  btn.disabled = missing>0;
+  btn.title = missing>0 ? `${missing} match${missing>1?'s':''} de poule restant${missing>1?'s':''} avant de pouvoir lancer la finale` : 'Toutes les poules sont terminées';
+  btn.textContent = missing>0 ? `🔒 Phase finale (${missing} match${missing>1?'s':''} restant${missing>1?'s':''})` : '🏆 Générer la phase finale';
+}
+
 window.generateBracket = function(){
   if(!isAdmin()) return;
-  // Vérifie que toutes les poules ont un classement complet
-  const allDone = ['A','B','C','D'].every(p=>{
+  // Vérifie que toutes les poules ont un classement complet — BLOCAGE STRICT :
+  // contrairement à avant, il n'y a plus de confirmation pour passer en force,
+  // la phase finale ne peut pas être générée tant qu'un seul match de poule
+  // n'a pas son résultat saisi.
+  const missingByPool = {};
+  ['A','B','C','D'].forEach(p=>{
     const matches = ST.poolSchedule.filter(m=>m.pool===p);
-    return matches.every(m=>{ const r=getPoolResult(m.matchId); return r.ga!==''&&r.gb!=='' ; });
+    const missing = matches.filter(m=>{ const r=getPoolResult(m.matchId); return !(r.ga!==''&&r.gb!=='') ; }).length;
+    if(missing) missingByPool[p]=missing;
   });
-  if(!allDone && !confirm('Tous les matchs de poules ne sont pas terminés. Générer quand même la phase finale (places non qualifiées resteront vides) ?')) return;
+  const allDone = Object.keys(missingByPool).length===0;
+  if(!allDone){
+    const detail = Object.entries(missingByPool)
+      .map(([p,n])=>`• Poule ${p} : ${n} match${n>1?'s':''} restant${n>1?'s':''}`).join('\n');
+    alert('Impossible de générer la phase finale : tous les matchs de poules doivent être terminés.\n\n'+detail);
+    return;
+  }
 
   const cfg = ST.cfg;
   const courts = cfg.courts||4;
@@ -2093,6 +2119,7 @@ function rankRowColor(rank){
 }
 function renderPoolStandingsPanel(){
   const el=document.getElementById('poolStandingsPanel'); if(!el) return;
+  updateGenerateBracketBtn();
   el.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:10px">` +
     ['A','B','C','D'].map(p=>{
       const st=computePoolStandings(p);
@@ -2233,15 +2260,21 @@ function saveTVSettings(patch){
 
 function startTVCycle(){
   stopTVCycle();
+  tvScreenIndex = 0;
   const cfg = getTVSettings();
-  tvActiveSub = (cfg.mode==='standings') ? 'standings' : 'results';
-  if(cfg.mode==='cycle'){
-    const sec = Math.max(5, +cfg.interval || 12);
-    tvCycleIv = setInterval(()=>{
-      tvActiveSub = (tvActiveSub==='results') ? 'standings' : 'results';
+  const sec = Math.max(5, +cfg.interval || 12);
+  // On programme toujours une avancée périodique : en mode 'cycle' ça
+  // alterne TOUS les écrans (résultats + classement) ; en mode 'results'
+  // ou 'standings' ça n'avance qu'entre écrans du même type s'il y en a
+  // plusieurs (ex : Tour 1 / Tour 2 / Tour Classement, ou pages de poules
+  // 1/2, 2/2 s'il y a plus de 12 matchs).
+  tvCycleIv = setInterval(()=>{
+    const screens = getActiveTVScreens();
+    if(screens.length>1){
+      tvScreenIndex = (tvScreenIndex+1) % screens.length;
       renderTVContent();
-    }, sec*1000);
-  }
+    }
+  }, sec*1000);
   tvClockIv = setInterval(updateTVClock, 1000);
   updateTVClock();
 }
@@ -2362,32 +2395,74 @@ function tvMatchRowHTML(m, isLive){
     </div>
   </div>`;
 }
-function tvResultsHTML(){
-  const all = tvAllMatchesFlat();
-  // "En cours" = matchs du créneau/tour actuellement ouvert à la saisie par
-  // la table de marque (ST.activePoolRound / ST.activeBracketRound), pas
-  // encore renseignés — bien plus fiable que de comparer à l'horloge, car
-  // un tournoi peut prendre du retard sur l'horaire théorique.
-  let live = [];
-  if(ST.activeView==='pools' && typeof ST.activePoolRound==='number'){
-    live = all.filter(m=>m.type==='pool' && m.slot===ST.activePoolRound && !m.done);
-  } else if(ST.activeView==='bracket'){
-    const matches = (ST.bracketSchedule||[]).filter(b=>b.round===ST.activeBracketRound);
-    const liveSlots = new Set(matches.map(b=>b.slot));
-    live = all.filter(m=>m.type==='bracket' && liveSlots.has(m.slot) && !m.done);
-  }
-  const finished = all.filter(m=>m.done).sort((a,b)=> (b.time||'').localeCompare(a.time||'') || b.slot-a.slot);
+// Grille de cartes de match. isLiveFn(m) détermine si CE match doit être mis
+// en avant comme "en cours" (uniquement pertinent s'il n'est pas encore joué).
+function tvMatchGridHTML(matches, isLiveFn){
+  if(!matches.length) return `<div class="tv-empty">Aucun match à afficher pour le moment.</div>`;
+  const cards = matches.map(m=>tvMatchRowHTML(m, !m.done && isLiveFn && isLiveFn(m))).join('');
+  return `<div class="tv-match-grid">${cards}</div>`;
+}
 
-  let html = '';
-  if(live.length){
-    html += `<div class="tv-section-ttl tv-live-ttl"><span class="tv-live-dot"></span> En cours</div>`;
-    html += `<div class="tv-match-grid">${live.map(m=>tvMatchRowHTML(m,true)).join('')}</div>`;
+const TV_PAGE_SIZE = 12; // nombre maximum de matchs affichés sur un même écran avant de passer à la page suivante
+
+// Construit la liste ordonnée des "écrans" disponibles pour la phase en
+// cours. Pendant les poules : uniquement les matchs/classements de poules.
+// Dès que la finale est généré : plus aucun mélange avec les poules — les
+// matchs de la finale sont séparés tour par tour (Tour 1 / Tour 2 / Tour
+// Classement), suivis du classement final. Chaque écran affiche au plus
+// TV_PAGE_SIZE matchs (au-delà, pagination automatique).
+function getTVScreens(){
+  const screens = [];
+  if(ST.phase==='pools'){
+    const poolMatches = tvAllMatchesFlat().filter(m=>m.type==='pool').sort((a,b)=>a.slot-b.slot||a.court-b.court);
+    const isLiveNow = (ST.activeView==='pools' && typeof ST.activePoolRound==='number')
+      ? (m=>m.slot===ST.activePoolRound) : (()=>false);
+    const pageCount = Math.max(1, Math.ceil(poolMatches.length/TV_PAGE_SIZE));
+    for(let i=0;i<pageCount;i++){
+      const page = poolMatches.slice(i*TV_PAGE_SIZE,(i+1)*TV_PAGE_SIZE);
+      screens.push({
+        key:'pool-'+i, kind:'matches',
+        title: pageCount>1 ? `⚽ Matchs de Poules (${i+1}/${pageCount})` : '⚽ Matchs de Poules',
+        render: ()=>tvMatchGridHTML(page, isLiveNow)
+      });
+    }
+    screens.push({ key:'pool-std', kind:'standings', title:'📊 Classement des Poules', render: tvStandingsPoolsHTML });
+  } else {
+    // Phase finale (bracket en cours ou terminé) : on ne montre plus du
+    // tout les matchs de poules, uniquement la finale, tour par tour.
+    const roundTitle = { 1:'🏆 Tour 1', 2:'🏆 Tour 2', 3:'🏆 Tour Classement' };
+    [1,2,3].forEach(round=>{
+      const matches = (ST.bracketSchedule||[]).filter(b=>b.round===round).sort((a,b)=>a.slot-b.slot||a.court-b.court);
+      if(!matches.length) return;
+      const flat = matches.map(b=>{
+        const r = getBracketResult(b.m);
+        return { slot:b.slot, court:b.court, time:b.time, label:b.label||bracketLabel(b.m),
+          aId:bracketTeam(b.m,'a'), bId:bracketTeam(b.m,'b'), r, done:(r.ga!==''&&r.gb!=='') };
+      });
+      const isLiveNow = ()=> ST.activeView==='bracket' && ST.activeBracketRound===round;
+      // Pagination de sécurité si jamais un tour dépassait 12 matchs (cas inhabituel).
+      const pageCount = Math.max(1, Math.ceil(flat.length/TV_PAGE_SIZE));
+      for(let i=0;i<pageCount;i++){
+        const page = flat.slice(i*TV_PAGE_SIZE,(i+1)*TV_PAGE_SIZE);
+        screens.push({
+          key:'bracket-r'+round+'-'+i, kind:'matches',
+          title: pageCount>1 ? `${roundTitle[round]} (${i+1}/${pageCount})` : roundTitle[round],
+          render: ()=>tvMatchGridHTML(page, isLiveNow)
+        });
+      }
+    });
+    screens.push({ key:'final-rank', kind:'standings', title:'🥇 Classement Final', render: tvFinalRankingHTML });
   }
-  html += `<div class="tv-section-ttl">Résultats (${finished.length})</div>`;
-  html += finished.length
-    ? `<div class="tv-match-grid">${finished.map(m=>tvMatchRowHTML(m,false)).join('')}</div>`
-    : `<div class="tv-empty">En attente des premiers résultats…</div>`;
-  return html;
+  return screens;
+}
+// Applique le filtre du réglage "Affichage" (Résultats / Classement / Alterné)
+// à la liste d'écrans de la phase en cours.
+function getActiveTVScreens(){
+  const screens = getTVScreens();
+  const cfg = getTVSettings();
+  if(cfg.mode==='results')   return screens.filter(s=>s.kind==='matches');
+  if(cfg.mode==='standings') return screens.filter(s=>s.kind==='standings');
+  return screens; // 'cycle' = tout, dans l'ordre (Tour 1 → Tour 2 → Tour Classement → Classement final)
 }
 function tvStandingsPoolsHTML(){
   return `<div class="tv-pools-grid">` + ['A','B','C','D'].map(p=>{
@@ -2420,13 +2495,22 @@ function renderTVContent(){
   const el=document.getElementById('tvContent'); if(!el) return;
   const phaseEl=document.getElementById('tvPhaseBadge');
   if(phaseEl) phaseEl.textContent = ST.phase==='pools' ? '🏊 Phase de poules' : ST.phase==='bracket' ? '🏆 Phase finale' : '🏁 Tournoi terminé';
+
+  // Changement de phase (ex : poules → finale) : on repart du 1er écran
+  // plutôt que de garder un index qui ne correspondrait plus à rien.
+  if(ST.phase !== tvLastPhase){ tvLastPhase = ST.phase; tvScreenIndex = 0; }
+
+  const screens = getActiveTVScreens();
+  if(tvScreenIndex >= screens.length) tvScreenIndex = 0;
+  const screen = screens[tvScreenIndex];
   const subEl=document.getElementById('tvSubTitle');
-  if(tvActiveSub==='standings'){
-    if(subEl) subEl.textContent = (ST.phase==='pools') ? '📊 Classement des poules' : '🏆 Classement';
-    el.innerHTML = (ST.phase==='pools') ? tvStandingsPoolsHTML() : tvFinalRankingHTML();
+
+  if(!screen){
+    if(subEl) subEl.textContent = '';
+    el.innerHTML = `<div class="tv-empty">Rien à afficher pour le moment.</div>`;
   } else {
-    if(subEl) subEl.textContent = '⚽ Résultats en direct';
-    el.innerHTML = tvResultsHTML();
+    if(subEl) subEl.textContent = screen.title;
+    el.innerHTML = screen.render();
   }
   startTVAutoScroll();
 }
@@ -3374,7 +3458,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
     <div class="card" style="margin-top:18px">
       <div class="card-ttl">
         <span>📊 Classements des poules (en direct)</span>
-        <button class="btn btn-b btn-xs" data-role="admin" onclick="generateBracket()">🏆 Générer la phase finale</button>
+        <button class="btn btn-b btn-xs" id="genBracketBtn" data-role="admin" onclick="generateBracket()">🏆 Générer la phase finale</button>
       </div>
       <div id="poolStandingsPanel"></div>
     </div>
