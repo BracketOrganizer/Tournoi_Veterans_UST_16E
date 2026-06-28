@@ -1145,8 +1145,10 @@ window.generateBracket = function(){
   slotDurations.push(matchSlotDur);
   slotIdx++;
 
-  // Pas de créneau TAB après la finale : le bouton "Classement final" prend
-  // le relais directement depuis la vue "Classement final" du tour 3.
+  // Créneau T.A.B. après la finale, comme aux tours 1 et 2.
+  tabSlots.push({ round: 3, slot: slotIdx });
+  slotDurations.push(tabDur);
+  slotIdx++;
 
   const totalSlots = slotIdx;
   // (Les coupures déjà consommées pendant les poules, et celle éventuelle de
