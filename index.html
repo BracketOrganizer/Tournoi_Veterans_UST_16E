@@ -558,7 +558,9 @@ function refreshCurrentPage(){
   if(ST.page==='TV') renderTVContent();
   updateLiveToggleBtn(); // le panneau admin (bouton live) est visible en permanence, pas lié à ST.page
   const refPanel = document.getElementById('refereesPanel');
-  if(refPanel && refPanel.style.display!=='none') renderRefereesPanel();
+  if(refPanel && refPanel.style.display!=='none'){
+    try { renderRefereesPanel(); } catch(e){ console.error('renderRefereesPanel (refresh)', e); }
+  }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -1520,9 +1522,16 @@ window.toggleRefereesPanel = function(){
   if(!isAdmin()) return;
   const p=document.getElementById('refereesPanel');
   if(!p) return;
-  const show = p.style.display==='none';
+  const show = p.style.display==='none' || getComputedStyle(p).display==='none';
   p.style.display = show ? '' : 'none';
-  if(show) renderRefereesPanel();
+  if(show){
+    try { renderRefereesPanel(); }
+    catch(e){
+      console.error('renderRefereesPanel', e);
+      const el = document.getElementById('refereesPanelBody');
+      if(el) el.innerHTML = `<div class="info" style="background:#fdeceb;color:#c0281a;padding:10px;border-radius:6px;font-size:12px">⚠️ Erreur d'affichage du panneau arbitres : ${e.message}. Merci de faire un rafraîchissement complet de la page (Ctrl+Maj+R / Cmd+Maj+R) puis de réessayer. Si le problème persiste, ouvrez la console (F12) et copiez le message d'erreur.</div>`;
+    }
+  }
 };
 
 // Renvoie les arbitres affectés à un terrain donné pour une phase donnée.
@@ -1658,9 +1667,12 @@ function renderRefereesPanel(){
     </div>` : '';
 
   el.innerHTML = `
-    <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <input type="text" id="newRefName" placeholder="Nom de l'arbitre" style="width:auto;min-width:180px" onkeydown="if(event.key==='Enter')addReferee()">
-      <button class="btn btn-g btn-xs" onclick="addReferee()">➕ Ajouter</button>
+    <div style="margin-bottom:12px;background:var(--s2);border:2px dashed var(--grn);border-radius:8px;padding:10px 12px">
+      <label style="display:block;font-size:12px;font-weight:700;margin-bottom:6px">➕ Ajouter un arbitre à la liste</label>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="newRefName" placeholder="Nom de l'arbitre (ex : Jean Dupont)" style="width:auto;min-width:220px;flex:1" onkeydown="if(event.key==='Enter')addReferee()">
+        <button class="btn btn-g btn-sm" onclick="addReferee()">➕ Ajouter</button>
+      </div>
     </div>
     <div style="margin-bottom:8px">${listHTML}</div>
     ${phaseGrid('pools','🏊 Phase de poules')}
