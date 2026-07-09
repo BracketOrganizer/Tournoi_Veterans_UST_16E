@@ -110,6 +110,8 @@ const ST = {
 function isAdmin()  { return USER_ROLE === 'admin'; }
 function isScorer() { return USER_ROLE === 'admin' || USER_ROLE === 'scorer'; }
 function isManager(){ return USER_ROLE === 'manager'; }
+function isReferee(){ return USER_ROLE === 'referee'; }
+function canSeeReferees(){ return isAdmin() || isScorer() || isReferee(); }
 function isLiveBlocked(){ return USER_ROLE === 'spectator' && !ST.liveOpen; }
 
 function addMinutes(timeStr, mins){
@@ -964,6 +966,30 @@ window.setMatchReferee = async function(type, matchId, index, name){
   await saveTournament({ referees });
 };
 
+// Retourne l'ensemble des noms d'arbitres déjà utilisés au même horaire (autre match,
+// n'importe quel terrain — un arbitre ne peut pas être à deux endroits en même temps)
+// ou déjà choisis sur un AUTRE créneau du même match (évite un doublon dans un même match).
+// Le nom actuellement sélectionné dans CE créneau précis n'est jamais exclu de sa propre liste.
+function getUnavailableReferees(type, matchId, slotIndex, time){
+  const unavailable = new Set();
+  const selfKey = (type==='pool'?'pool-':'bracket-')+matchId;
+  const selfAssigned = (ST.referees && ST.referees[selfKey]) || [];
+  selfAssigned.forEach((n,idx)=>{ if(idx!==slotIndex && n) unavailable.add(n); });
+  if(time){
+    const scan = (schedule, kind) => {
+      (schedule||[]).forEach(m=>{
+        if(m.time !== time) return;
+        const key = kind+'-'+m.m;
+        if(key===selfKey) return; // déjà traité ci-dessus
+        ((ST.referees && ST.referees[key]) || []).forEach(n=>{ if(n) unavailable.add(n); });
+      });
+    };
+    scan(ST.poolSchedule, 'pool');
+    scan(ST.bracketSchedule, 'bracket');
+  }
+  return unavailable;
+}
+
 // Détermine vainqueur/perdant d'un match de phase finale (avec tirs au but si égalité)
 function bracketMatchWinner(m){
   const r = getBracketResult(m);
@@ -1220,9 +1246,10 @@ function showApp(){
   document.getElementById('appScreen').style.display='block';
   applyRoleUI();
   if(USER_ROLE === 'manager') goTo('M');
+  if(USER_ROLE === 'referee') goTo(4);
 }
 function roleBadge(role){
-  const map={admin:'👑 Admin',scorer:'✏️ Scorer (saisie scores)',manager:'🛡️ Responsable équipe',spectator:'👁 Spectateur'};
+  const map={admin:'👑 Admin',scorer:'✏️ Scorer (saisie scores)',manager:'🛡️ Responsable équipe',referee:'🧑\u200d⚖️ Arbitre',spectator:'👁 Spectateur'};
   return map[role]||role;
 }
 
@@ -1240,7 +1267,7 @@ function applyRoleUI(){
   const specNav = document.getElementById('specNav');
   if(specNav) specNav.classList.toggle('visible', isSpec);
   const stepNav = document.getElementById('stepNav');
-  if(stepNav) stepNav.style.display = (isSpec || isManager()) ? 'none' : '';
+  if(stepNav) stepNav.style.display = (isSpec || isManager() || isReferee()) ? 'none' : '';
   document.querySelectorAll('[data-role="admin"]').forEach(el=>{ el.style.display = isAdmin() ? '' : 'none'; });
   document.querySelectorAll('[data-role="scorer"]').forEach(el=>{ el.style.display = isScorer() ? '' : 'none'; });
   document.querySelectorAll('[data-role="manager"]').forEach(el=>{ el.style.display = isManager() ? '' : 'none'; });
@@ -1293,6 +1320,7 @@ window.goFwd = function(){
 };
 
 window.goTo = function(n){
+  if(USER_ROLE === 'referee' && n !== 4) n = 4; // arbitre : accès limité au live (page 4)
   if(n!=='R' && isLiveBlocked()){
     const overlay = document.getElementById('liveClosedOverlay');
     if(overlay) overlay.style.display='flex';
@@ -1450,7 +1478,7 @@ window.loadUsersList = async function(){
 function renderUsersList(users){
   const el=document.getElementById('usersList'); if(!el) return;
   if(!users.length){ el.innerHTML='<div class="info info-y" style="font-size:12px">Aucun compte enregistré pour le moment (les comptes apparaissent ici après leur 1ère connexion).</div>'; return; }
-  const roleColor = r => r==='admin' ? 'var(--red)' : r==='scorer' ? 'var(--blu)' : r==='manager' ? 'var(--ylw)' : 'var(--muted)';
+  const roleColor = r => r==='admin' ? 'var(--red)' : r==='scorer' ? 'var(--blu)' : r==='manager' ? 'var(--ylw)' : r==='referee' ? 'var(--grn)' : 'var(--muted)';
   const limit=ST.cfg.n||ST.teams.length;
   const teams=ST.teams.slice(0,limit);
   el.innerHTML = users.map(u=>`
@@ -1464,6 +1492,7 @@ function renderUsersList(users){
         <option value="spectator" ${u.role==='spectator'||!u.role?'selected':''}>👁 Spectateur</option>
         <option value="scorer" ${u.role==='scorer'?'selected':''}>✏️ Scorer (saisie scores)</option>
         <option value="manager" ${u.role==='manager'?'selected':''}>🛡️ Responsable d'équipe</option>
+        <option value="referee" ${u.role==='referee'?'selected':''}>🧑‍⚖️ Arbitre</option>
         <option value="admin" ${u.role==='admin'?'selected':''}>👑 Admin</option>
       </select>
       ${u.role==='manager' ? `<select onchange="changeUserTeam('${u.id}', this.value)" style="width:auto;min-width:140px" title="Changer l'équipe gérée">
@@ -2736,7 +2765,7 @@ function matchCardHTML(type, matchId, aId, bId, r, subtitle, court, time, needsS
   const done = r.ga!==''&&r.gb!=='';
   let shootoutHTML='';
   let refereesHTML='';
-  if(ST.cfg.refereesEnabled && court){
+  if(ST.cfg.refereesEnabled && court && canSeeReferees()){
     const options = (ST.cfg.refereesByCourt && ST.cfg.refereesByCourt[court]) || [];
     const count = ST.cfg.refereesCount===3 ? 3 : 1;
     const assigned = getMatchReferees(type, matchId);
@@ -2745,8 +2774,10 @@ function matchCardHTML(type, matchId, aId, bId, r, subtitle, court, time, needsS
     for(let i=0;i<count;i++){
       const val = assigned[i]||'';
       if(canEditRef){
+        const unavailable = getUnavailableReferees(type, matchId, i, time);
+        const availableOptions = options.filter(n => n===val || !unavailable.has(n));
         const opts = ['<option value="">— Choisir —</option>']
-          .concat(options.map(n=>`<option value="${n.replace(/"/g,'&quot;')}" ${n===val?'selected':''}>${n}</option>`)).join('');
+          .concat(availableOptions.map(n=>`<option value="${n.replace(/"/g,'&quot;')}" ${n===val?'selected':''}>${n}</option>`)).join('');
         parts.push(`<select id="ref_${type}_${matchId}_${i}" style="font-size:11px;max-width:140px" title="Arbitre ${i+1}" aria-label="Arbitre ${i+1}" onchange="setMatchReferee('${type}',${matchId},${i},this.value)">${opts}</select>`);
       } else if(val){
         parts.push(`<span>${val}</span>`);
@@ -3425,6 +3456,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
           <option value="scorer" selected>✏️ Scorer (saisie scores)</option>
           <option value="admin">👑 Admin</option>
           <option value="manager">🛡️ Responsable d'équipe</option>
+          <option value="referee">🧑‍⚖️ Arbitre</option>
           <option value="spectator">👁 Spectateur</option>
         </select>
         <input type="email" id="newStaffEmail" placeholder="email@exemple.com">
