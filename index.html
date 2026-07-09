@@ -528,8 +528,8 @@ function subscribeToTournament(){
     ST.bracketBreaks    = data.bracketBreaks || [];
     if(data.results)         ST.results         = data.results;
     if(data.phase)           ST.phase           = data.phase;
-    if(data.referees)        ST.referees        = data.referees;
-    ST.refereeAssignments = data.refereeAssignments || { pools:{}, bracket:{} };
+    if(data.referees)        ST.referees        = Array.isArray(data.referees) ? data.referees : [];
+    ST.refereeAssignments = sanitizeRefereeAssignments(data.refereeAssignments);
     handleLiveOpenChange(data.liveOpen === true);
     refreshCurrentPage();
   }, (e)=>{ console.warn('subscribeToTournament', e); });
@@ -1518,6 +1518,34 @@ window.deleteStaffAccount = async function(userId, label){
 // Un arbitre affecté à un terrain fait TOUS les matchs de ce terrain sur la
 // phase concernée, tant que l'admin ne réaffecte/n'inverse pas manuellement.
 
+// Le document Firestore 'foottournoi/current' est partagé avec une autre
+// appli (voir avertissement en tête de fichier) : on ne fait donc jamais
+// confiance à la forme brute de data.referees / data.refereeAssignments et on
+// la valide/nettoie systématiquement pour éviter tout plantage (ex: champ
+// écrasé par un type inattendu).
+function sanitizeRefereeAssignments(ra){
+  const out = { pools:{}, bracket:{} };
+  if(ra && typeof ra==='object'){
+    ['pools','bracket'].forEach(phaseKey=>{
+      const p = ra[phaseKey];
+      if(p && typeof p==='object' && !Array.isArray(p)){
+        Object.keys(p).forEach(c=>{
+          out[phaseKey][c] = Array.isArray(p[c]) ? p[c].filter(x=>typeof x==='string') : [];
+        });
+      }
+    });
+  }
+  return out;
+}
+
+// Accesseur défensif : si ST.referees n'est pas (ou plus) un tableau — par
+// exemple à cause d'une donnée inattendue sur le document Firestore partagé —
+// on le réinitialise proprement au lieu de planter.
+function refList(){
+  if(!Array.isArray(ST.referees)) ST.referees = [];
+  return ST.referees;
+}
+
 window.toggleRefereesPanel = function(){
   if(!isAdmin()) return;
   const p=document.getElementById('refereesPanel');
@@ -1561,7 +1589,7 @@ window.addReferee = function(){
   const inp = document.getElementById('newRefName');
   const name = (inp?.value||'').trim();
   if(!name) return;
-  const list = ST.referees||[];
+  const list = refList();
   if(list.includes(name)){ alert('Cet arbitre existe déjà dans la liste.'); return; }
   ST.referees = [...list, name];
   if(inp) inp.value='';
@@ -1572,7 +1600,7 @@ window.addReferee = function(){
 window.removeReferee = function(name){
   if(!isAdmin()) return;
   if(!confirm(`Retirer l'arbitre "${name}" de la liste ?\n\nIl sera aussi retiré de toutes les affectations en cours.`)) return;
-  ST.referees = (ST.referees||[]).filter(r=>r!==name);
+  ST.referees = refList().filter(r=>r!==name);
   const assignments = ST.refereeAssignments || { pools:{}, bracket:{} };
   ['pools','bracket'].forEach(phaseKey=>{
     const assign = assignments[phaseKey]||{};
@@ -1618,7 +1646,7 @@ function renderRefereesPanel(){
   if(!el) return;
   const courts = ST.cfg.courts||4;
   const perCourt = Math.min(4,Math.max(1,ST.cfg.refereesPerCourt||1));
-  const referees = ST.referees||[];
+  const referees = refList();
   if(!ST.refereeAssignments) ST.refereeAssignments = { pools:{}, bracket:{} };
 
   const listHTML = referees.length
@@ -1743,7 +1771,7 @@ window.printRefereeScheduleSingle = function(name){
 };
 
 window.printAllRefereeSchedules = function(){
-  const referees = ST.referees||[];
+  const referees = refList();
   if(!referees.length){ alert('Aucun arbitre dans la liste.'); return; }
   const fiches = referees.map(name=>refereeScheduleFicheHTML(name));
   const win = window.open('','_allrefs','width=1000,height=750');
