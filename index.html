@@ -99,8 +99,12 @@ const ST = {
     // d'un créneau), peu importe qu'on soit en phase de poules ou en finale.
     breaks:[ { time:'12:00', duration:45, label:'Pause déjeuner' } ],
     tabDuration:10,        // durée allouée à un créneau T.A.B. (minutes), réglable
-    draw:'order'           // 'order' | 'random' | 'random-no-club'
-  }
+    draw:'order',          // 'order' | 'random' | 'random-no-club'
+    refereesEnabled:false, // active la gestion des arbitres par match
+    refereesCount:1,       // nombre d'arbitres par match : 1 ou 3
+    refereesByCourt:{}     // { "1":["Nom1","Nom2",...], "2":[...], ... } — arbitres disponibles par terrain
+  },
+  referees:{}      // clé "pool-M" ou "bracket-M" -> ["Nom1","Nom2","Nom3"] (arbitres assignés à ce match)
 };
 
 function isAdmin()  { return USER_ROLE === 'admin'; }
@@ -520,6 +524,7 @@ function subscribeToTournament(){
     ST.bracketTabSlots  = data.bracketTabSlots || [];
     ST.bracketBreaks    = data.bracketBreaks || [];
     if(data.results)         ST.results         = data.results;
+    if(data.referees)        ST.referees        = data.referees;
     if(data.phase)           ST.phase           = data.phase;
     handleLiveOpenChange(data.liveOpen === true);
     refreshCurrentPage();
@@ -738,8 +743,9 @@ window.buildPoolSchedule = function(){
   ST.poolTabSlot = { time: slotTimes[tabSlotIdx], slot: tabSlotIdx }; // créneau TAB de poule (info)
   ST.poolBreaks = insertedBreaks; // coupures réellement insérées pendant la phase de poules (affichage planning)
   ST.results = {};
+  ST.referees = {};
   ST.phase='pools';
-  saveTournament({ poolSchedule: finalSchedule, poolTabSlot: ST.poolTabSlot, poolBreaks: insertedBreaks, results:{}, phase:'pools', bracketSchedule:[] });
+  saveTournament({ poolSchedule: finalSchedule, poolTabSlot: ST.poolTabSlot, poolBreaks: insertedBreaks, results:{}, referees:{}, phase:'pools', bracketSchedule:[] });
   renderPlanningPreview();
 };
 
@@ -940,6 +946,22 @@ window.setBracketResult = async function(m, ga, gb, shootout){
   const results = { ...ST.results, [key]: { ga, gb, shootout: shootout||null } };
   ST.results = results;
   await saveTournament({ results });
+};
+
+// ── Arbitres assignés à un match (poule ou finale) ──
+// clé identique à celle des résultats : "pool-M" ou "bracket-M"
+function getMatchReferees(type, matchId){
+  const key = (type==='pool'?'pool-':'bracket-')+matchId;
+  return (ST.referees && ST.referees[key]) || [];
+}
+window.setMatchReferee = async function(type, matchId, index, name){
+  if(!isScorer()) return;
+  const key = (type==='pool'?'pool-':'bracket-')+matchId;
+  const current = (ST.referees && ST.referees[key]) ? ST.referees[key].slice() : [];
+  current[index] = name || '';
+  const referees = { ...ST.referees, [key]: current };
+  ST.referees = referees;
+  await saveTournament({ referees });
 };
 
 // Détermine vainqueur/perdant d'un match de phase finale (avec tirs au but si égalité)
@@ -1172,7 +1194,8 @@ window.resetAllResults = async function(){
   if(!isAdmin()) return;
   if(!confirm('Réinitialiser TOUS les scores (poules + phase finale) ? Cette action est irréversible.')) return;
   ST.results = {};
-  await saveTournament({ results: {} });
+  ST.referees = {};
+  await saveTournament({ results: {}, referees: {} });
   refreshCurrentPage();
 };
 
@@ -1180,8 +1203,8 @@ window.newTournament = async function(){
   if(!isAdmin()){ alert('Admin uniquement.'); return; }
   if(!confirm('Nouveau tournoi ? Toutes les données (équipes, poules, scores) seront définitivement supprimées.')) return;
   ST.teams=[]; ST.pools={A:[],B:[],C:[],D:[]}; ST.poolSchedule=[]; ST.bracketSchedule=[];
-  ST.results={}; ST.phase='pools'; ST.activeView='pools'; ST.activePoolRound=0; ST.activeBracketRound=1;
-  await saveTournament({ teams:[], pools:{A:[],B:[],C:[],D:[]}, poolSchedule:[], bracketSchedule:[], results:{}, phase:'pools', liveOpen:false });
+  ST.results={}; ST.referees={}; ST.phase='pools'; ST.activeView='pools'; ST.activePoolRound=0; ST.activeBracketRound=1;
+  await saveTournament({ teams:[], pools:{A:[],B:[],C:[],D:[]}, poolSchedule:[], bracketSchedule:[], results:{}, referees:{}, phase:'pools', liveOpen:false });
   goTo(1);
 };
 
@@ -1589,6 +1612,7 @@ window.goToLive = function(){ goTo(4); closeMobileMenu(); };
 // PAGE 1 — CONFIG
 // ══════════════════════════════════════════════════════════
 let _breaksDraft = [{ time:'12:00', duration:45, label:'Pause déjeuner' }]; // édité en page Config
+let _refereesByCourtDraft = {}; // { "1":["Nom1","Nom2"], "2":[...] } — édité en page Config
 
 function renderBreaksList(){
   const el = document.getElementById('breaksList'); if(!el) return;
@@ -1631,6 +1655,37 @@ window.updateBreakDraft = function(i, field, value){
   onCfgChange();
 };
 
+// ── Arbitres : liste des noms disponibles par terrain (brouillon éditable) ──
+function renderRefereesByCourtUI(){
+  const el = document.getElementById('refereesByCourtList'); if(!el) return;
+  const courts = Math.max(1, +(document.getElementById('cfg_courts')?.value || ST.cfg.courts || 4));
+  el.innerHTML = Array.from({length:courts}, (_,i)=>{
+    const n = i+1;
+    const names = (_refereesByCourtDraft[n]||[]).join('\n');
+    return `<div style="margin-bottom:8px">
+      <label>Terrain ${n} — arbitres disponibles (un nom par ligne)</label>
+      <textarea id="ref_court_${n}" rows="2" style="width:100%;font-family:inherit;font-size:13px" placeholder="Ex : Jean Dupont" oninput="updateRefereesByCourtDraft(${n},this.value)">${names}</textarea>
+    </div>`;
+  }).join('');
+}
+window.updateRefereesByCourtDraft = function(court, value){
+  _refereesByCourtDraft[court] = value.split('\n').map(s=>s.trim()).filter(Boolean);
+};
+function getRefereesByCourtFromDraft(){
+  const out = {};
+  Object.keys(_refereesByCourtDraft).forEach(k=>{ if(_refereesByCourtDraft[k]?.length) out[k]=_refereesByCourtDraft[k]; });
+  return out;
+}
+window.onRefereesEnabledChange = function(){
+  const enabled = !!document.getElementById('cfg_referees_enabled')?.checked;
+  const wrap = document.getElementById('refereesConfigWrap');
+  if(wrap) wrap.style.display = enabled ? '' : 'none';
+  onCfgChange();
+};
+window.onCourtsChangeForReferees = function(){
+  renderRefereesByCourtUI();
+};
+
 function getCfg(){
   return {
     n:              16, // format officiel fixe : 16 équipes (4 poules de 4)
@@ -1642,6 +1697,9 @@ function getCfg(){
     breaks:         _breaksDraft.filter(b=>b.time).map(b=>({ time:b.time, duration:b.duration||0, label:b.label||'Coupure' })),
     tabDuration:    +(document.getElementById('cfg_tabdur')?.value||10),
     draw:           document.getElementById('cfg_draw')?.value||'order',
+    refereesEnabled: !!document.getElementById('cfg_referees_enabled')?.checked,
+    refereesCount:  (+(document.getElementById('cfg_referees_count')?.value||1))===3 ? 3 : 1,
+    refereesByCourt: getRefereesByCourtFromDraft(),
   };
 }
 function renderCfgForm(){
@@ -1661,6 +1719,14 @@ function renderCfgForm(){
   setV('cfg_start', c.start);
   setV('cfg_draw', c.draw||'order');
   setV('cfg_tabdur', c.tabDuration||10);
+  const refEnabledEl = document.getElementById('cfg_referees_enabled');
+  if(refEnabledEl) refEnabledEl.checked = !!c.refereesEnabled;
+  setV('cfg_referees_count', c.refereesCount===3?3:1);
+  const refWrap = document.getElementById('refereesConfigWrap');
+  if(refWrap) refWrap.style.display = c.refereesEnabled ? '' : 'none';
+  _refereesByCourtDraft = {};
+  Object.keys(c.refereesByCourt||{}).forEach(k=>{ _refereesByCourtDraft[k] = (c.refereesByCourt[k]||[]).slice(); });
+  renderRefereesByCourtUI();
   _breaksDraft = (c.breaks && c.breaks.length) ? c.breaks.map(b=>({...b})) : [{ time:'12:00', duration:45, label:'Pause déjeuner' }];
   renderBreaksList();
   onCfgChange();
@@ -2669,6 +2735,29 @@ function matchCardHTML(type, matchId, aId, bId, r, subtitle, court, time, needsS
   const canEdit = isScorer() && aId && bId;
   const done = r.ga!==''&&r.gb!=='';
   let shootoutHTML='';
+  let refereesHTML='';
+  if(ST.cfg.refereesEnabled && court){
+    const options = (ST.cfg.refereesByCourt && ST.cfg.refereesByCourt[court]) || [];
+    const count = ST.cfg.refereesCount===3 ? 3 : 1;
+    const assigned = getMatchReferees(type, matchId);
+    const canEditRef = isScorer();
+    const parts = [];
+    for(let i=0;i<count;i++){
+      const val = assigned[i]||'';
+      if(canEditRef){
+        const opts = ['<option value="">— Choisir —</option>']
+          .concat(options.map(n=>`<option value="${n.replace(/"/g,'&quot;')}" ${n===val?'selected':''}>${n}</option>`)).join('');
+        parts.push(`<select id="ref_${type}_${matchId}_${i}" style="font-size:11px;max-width:140px" title="Arbitre ${i+1}" aria-label="Arbitre ${i+1}" onchange="setMatchReferee('${type}',${matchId},${i},this.value)">${opts}</select>`);
+      } else if(val){
+        parts.push(`<span>${val}</span>`);
+      }
+    }
+    if(canEditRef || parts.length){
+      refereesHTML = `<div style="margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:11px;color:var(--muted)">
+        🧑‍⚖️ ${count>1?'Arbitres':'Arbitre'} : ${parts.join(' ')}
+      </div>`;
+    }
+  }
   if(needsShootout){
     const so=r.shootout||{};
     shootoutHTML = `<div style="margin-top:6px;padding:6px 10px;background:var(--ylw-bg);border-radius:6px;font-size:11px">
@@ -2696,6 +2785,7 @@ function matchCardHTML(type, matchId, aId, bId, r, subtitle, court, time, needsS
       <div style="flex:1;text-align:right;font-weight:700">${bName}</div>
     </div>
     ${canEdit?`<div style="font-size:10px;color:var(--muted);margin-top:4px;text-align:right" id="sc_status_${type}_${matchId}"></div>`:''}
+    ${refereesHTML}
     ${shootoutHTML}
   </div>`;
 }
@@ -3395,7 +3485,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         </div>
         <div>
           <label>Nombre de terrains</label>
-          <input type="number" id="cfg_courts" value="4" min="1" max="12" title="Nombre de terrains" aria-label="Nombre de terrains" oninput="onCfgChange()">
+          <input type="number" id="cfg_courts" value="4" min="1" max="12" title="Nombre de terrains" aria-label="Nombre de terrains" oninput="onCfgChange();onCourtsChangeForReferees()">
         </div>
         <div>
           <label>Heure de début</label>
@@ -3455,6 +3545,31 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
           </select>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="card-ttl">🧑‍⚖️ Arbitres</div>
+    <div class="fr" style="align-items:center">
+      <div>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="cfg_referees_enabled" onchange="onRefereesEnabledChange()" style="width:auto">
+          Activer la gestion des arbitres
+        </label>
+      </div>
+      <div>
+        <label>Arbitres par match</label>
+        <select id="cfg_referees_count" oninput="onCfgChange()" title="Nombre d'arbitres par match" aria-label="Nombre d'arbitres par match">
+          <option value="1">1 arbitre</option>
+          <option value="3">3 arbitres</option>
+        </select>
+      </div>
+    </div>
+    <div id="refereesConfigWrap" style="margin-top:10px;display:none">
+      <div class="info info-b" style="font-size:12px;margin-bottom:10px">
+        Indiquez pour chaque terrain la liste des arbitres susceptibles d'y officier (un nom par ligne). Lors de la saisie des scores, il suffira de choisir le(s) nom(s) dans une liste déroulante propre à ce terrain.
+      </div>
+      <div id="refereesByCourtList"></div>
     </div>
   </div>
 
