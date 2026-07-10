@@ -106,7 +106,8 @@ const ST = {
     breaks:[ { time:'12:00', duration:45, label:'Pause déjeuner' } ],
     tabDuration:10,        // durée allouée à un créneau T.A.B. (minutes), réglable
     draw:'order',          // 'order' | 'random' | 'random-no-club'
-    refereesPerCourt:1     // nombre d'arbitres par terrain (1 à 4)
+    refereesPerCourt:1,    // nombre d'arbitres par terrain (1 à 4)
+    refereesEnabled:false   // active/désactive tout le système de gestion des arbitres
   }
 };
 
@@ -557,6 +558,7 @@ function refreshCurrentPage(){
   if(ST.page==='M') renderManagerPage();
   if(ST.page==='TV') renderTVContent();
   updateLiveToggleBtn(); // le panneau admin (bouton live) est visible en permanence, pas lié à ST.page
+  updateRefereesBtnVisibility();
   const refPanel = document.getElementById('refereesPanel');
   if(refPanel && refPanel.style.display!=='none'){
     try { renderRefereesPanel(); } catch(e){ console.error('renderRefereesPanel (refresh)', e); }
@@ -1236,6 +1238,7 @@ function applyRoleUI(){
   document.querySelectorAll('[data-role="manager"]').forEach(el=>{ el.style.display = isManager() ? '' : 'none'; });
   updateStepVisibility();
   updateFwdBtn();
+  updateRefereesBtnVisibility();
   updateBackFwdLabels();
   syncDrawerButtons();
 }
@@ -1546,8 +1549,22 @@ function refList(){
   return ST.referees;
 }
 
+// Affiche/masque le bouton "Gérer les arbitres" du panneau admin selon le
+// réglage cfg.refereesEnabled (case à cocher en page Config). Si le système
+// est désactivé, on masque aussi le panneau lui-même s'il était ouvert.
+function updateRefereesBtnVisibility(){
+  const btn = document.getElementById('refArbitresBtn');
+  const on = !!(ST.cfg && ST.cfg.refereesEnabled);
+  if(btn) btn.style.display = on ? '' : 'none';
+  if(!on){
+    const p = document.getElementById('refereesPanel');
+    if(p) p.style.display = 'none';
+  }
+}
+
 window.toggleRefereesPanel = function(){
   if(!isAdmin()) return;
+  if(!(ST.cfg && ST.cfg.refereesEnabled)){ alert("Active d'abord la gestion des arbitres dans la page Configuration."); return; }
   const p=document.getElementById('refereesPanel');
   if(!p) return;
   const show = p.style.display==='none' || getComputedStyle(p).display==='none';
@@ -1928,6 +1945,11 @@ window.updateBreakDraft = function(i, field, value){
   onCfgChange();
 };
 
+function toggleRefPerCourtVisibility(){
+  const on = !!document.getElementById('cfg_refon')?.checked;
+  const wrap = document.getElementById('cfg_refperc_wrap');
+  if(wrap) wrap.style.display = on ? '' : 'none';
+}
 function getCfg(){
   return {
     n:              16, // format officiel fixe : 16 équipes (4 poules de 4)
@@ -1940,6 +1962,7 @@ function getCfg(){
     tabDuration:    +(document.getElementById('cfg_tabdur')?.value||10),
     draw:           document.getElementById('cfg_draw')?.value||'order',
     refereesPerCourt: Math.min(4,Math.max(1,+(document.getElementById('cfg_refperc')?.value||1))),
+    refereesEnabled: !!document.getElementById('cfg_refon')?.checked,
   };
 }
 function renderCfgForm(){
@@ -1960,11 +1983,15 @@ function renderCfgForm(){
   setV('cfg_draw', c.draw||'order');
   setV('cfg_tabdur', c.tabDuration||10);
   setV('cfg_refperc', c.refereesPerCourt||1);
+  const refOnEl = document.getElementById('cfg_refon');
+  if(refOnEl) refOnEl.checked = !!c.refereesEnabled;
+  toggleRefPerCourtVisibility();
   _breaksDraft = (c.breaks && c.breaks.length) ? c.breaks.map(b=>({...b})) : [{ time:'12:00', duration:45, label:'Pause déjeuner' }];
   renderBreaksList();
   onCfgChange();
 }
 window.onCfgChange = function(){
+  toggleRefPerCourtVisibility();
   const n = +(document.getElementById('cfg_n')?.value||16);
   const courts = +(document.getElementById('cfg_courts')?.value||4);
   const matchDur = +(document.getElementById('cfg_matchdur')?.value||12);
@@ -2008,6 +2035,7 @@ window.saveCfgAndNext = async function(){
   if(!isAdmin()) return;
   const cfg=getCfg(); ST.cfg=cfg;
   await saveTournament({ cfg });
+  updateRefereesBtnVisibility();
   goTo(2);
 };
 
@@ -2970,7 +2998,7 @@ function matchCardHTML(type, matchId, aId, bId, r, subtitle, court, time, needsS
   // Arbitre(s) affecté(s) au terrain de ce match pour cette phase — visible
   // uniquement pour admin/scorer (jamais pour les spectateurs sur le live).
   const phaseKey = type==='pool' ? 'pools' : 'bracket';
-  const matchRefs = court ? refereesForCourt(phaseKey, court) : [];
+  const matchRefs = (ST.cfg?.refereesEnabled && court) ? refereesForCourt(phaseKey, court) : [];
   const refereeLineHTML = (isScorer() && matchRefs.length)
     ? `<div style="font-size:11px;color:var(--muted);margin-bottom:4px">🧑‍⚖️ ${matchRefs.join(', ')}</div>` : '';
   let shootoutHTML='';
@@ -3620,7 +3648,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
     <button class="btn btn-g btn-sm" id="liveToggleBtn" onclick="toggleLiveOpen()">🔴 Live fermé (spectateurs)</button>
     <button class="btn btn-b btn-sm" onclick="toggleAdminPanel();goTo('TV')">📺 Mode Écran (affichage)</button>
     <button class="btn btn-b btn-sm" onclick="toggleUsersPanel()">👥 Gérer le staff</button>
-    <button class="btn btn-b btn-sm" onclick="toggleRefereesPanel()">🧑‍⚖️ Gérer les arbitres</button>
+    <button class="btn btn-b btn-sm" id="refArbitresBtn" onclick="toggleRefereesPanel()">🧑‍⚖️ Gérer les arbitres</button>
     <button class="btn btn-b btn-sm" onclick="toggleAdminPanel();goTo('M')">📋 Feuilles d'équipe</button>
     <button class="btn btn-y btn-sm" onclick="resetAllResults()">🔄 Réinitialiser tous les scores</button>
     <button class="btn btn-r btn-sm" onclick="newTournament()">🆕 Nouveau tournoi</button>
@@ -3711,13 +3739,19 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
           <label>Nombre de terrains</label>
           <input type="number" id="cfg_courts" value="4" min="1" max="12" title="Nombre de terrains" aria-label="Nombre de terrains" oninput="onCfgChange()">
         </div>
-        <div>
+        <div id="cfg_refperc_wrap">
           <label>Arbitres par terrain</label>
           <input type="number" id="cfg_refperc" value="1" min="1" max="4" title="Nombre d'arbitres par terrain" aria-label="Nombre d'arbitres par terrain" oninput="onCfgChange()">
         </div>
         <div>
           <label>Heure de début</label>
           <input type="time" id="cfg_start" value="09:00" title="Heure de début" aria-label="Heure de début" oninput="onCfgChange()">
+        </div>
+      </div>
+      <div class="fr">
+        <div style="display:flex;align-items:center;gap:8px;padding-top:6px">
+          <input type="checkbox" id="cfg_refon" style="width:auto" oninput="onCfgChange()">
+          <label for="cfg_refon" style="margin:0;cursor:pointer">🧑‍⚖️ Activer la gestion des arbitres</label>
         </div>
       </div>
       <div class="fr">
