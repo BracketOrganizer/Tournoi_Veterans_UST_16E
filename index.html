@@ -113,7 +113,12 @@ const ST = {
     refereesPerCourt:1,    // nombre d'arbitres par terrain (1 à 4)
     refereesEnabled:false,  // active/désactive le système d'arbitres officiels
     teamRefereeingEnabled:false, // active/désactive l'arbitrage tournant par les équipes
-    maxTeamsPerClub:0      // 0 = illimité, sinon 1 ou 2 équipes max par club/entreprise
+    maxTeamsPerClub:0,     // 0 = illimité, sinon 1 ou 2 équipes max par club/entreprise — réglage GLOBAL par défaut
+    clubOverrides:{}       // dérogations individuelles par club : { "nom club normalisé": 0|1|2 }.
+                            // Une clé présente ICI prend le pas sur maxTeamsPerClub pour CE club
+                            // uniquement (ex: autoriser 2 équipes pour un seul club sans changer
+                            // le réglage global qui reste à 1 pour tous les autres). Réglable
+                            // depuis le panneau "Inscriptions" (admin).
   }
 };
 
@@ -292,7 +297,8 @@ async function getUserProfile(uid, email){
         return { role:'spectator', teamId:null };
       }
       return { role: d.role || 'spectator', teamId: d.teamId || null,
-        regStatus: d.regStatus || null, teamName: d.teamName || null };
+        regStatus: d.regStatus || null, teamName: d.teamName || null,
+        email: d.email || null, loginEmail: d.loginEmail || null };
     }
     return { role:'spectator', teamId:null }; // doc inexistant = nouvel utilisateur, rôle par défaut
   } catch(e){
@@ -329,7 +335,7 @@ onAuthStateChanged(auth, async (user)=>{
     if(USER_ROLE === 'registrant'){
       // Compte créé via le formulaire d'inscription publique, en attente de
       // validation (ou refusé) par l'admin — jamais l'accès complet à l'appli.
-      showRegistrantScreen(profile.regStatus, profile.teamName);
+      showRegistrantScreen(profile.regStatus, profile.teamName, profile.email, profile.loginEmail);
       return;
     }
     if(USER_ROLE === 'spectator'){
@@ -1334,21 +1340,56 @@ window.submitRegistration = async function(){
   const btn = document.getElementById('regSubmitBtn');
   if(btn) btn.disabled = true;
 
+  const errMap = {
+    'auth/email-already-in-use':'Cet email a déjà un compte. Utilisez un autre email ou contactez l\'organisation.',
+    'auth/invalid-email':'Adresse email invalide.',
+    'auth/weak-password':'Mot de passe trop faible (6 caractères minimum).',
+    'auth/operation-not-allowed':'La connexion par email n\'est pas activée sur cette appli (à activer côté organisateur dans Firebase Authentication).',
+    'auth/network-request-failed':'Problème de connexion réseau. Réessayez.',
+  };
+
   let cred;
+  let loginEmail = email; // identifiant technique réellement utilisé pour la connexion Firebase Auth
   try {
     cred = await createUserWithEmailAndPassword(auth, email, pwd);
   } catch(e){
-    console.error('submitRegistration: création du compte', e);
-    const map = {
-      'auth/email-already-in-use':'Cet email a déjà un compte. Utilisez un autre email ou contactez l\'organisation.',
-      'auth/invalid-email':'Adresse email invalide.',
-      'auth/weak-password':'Mot de passe trop faible (6 caractères minimum).',
-      'auth/operation-not-allowed':'La connexion par email n\'est pas activée sur cette appli (à activer côté organisateur dans Firebase Authentication).',
-      'auth/network-request-failed':'Problème de connexion réseau. Réessayez.',
-    };
-    setMsg(map[e.code] || `Erreur (${e.code||'inconnue'}) : ${e.message}`, 'red');
-    if(btn) btn.disabled = false;
-    return;
+    if(e.code === 'auth/email-already-in-use'){
+      // Un compte existe déjà avec cet email : c'est le cas normal d'un même
+      // responsable qui inscrit une 2e équipe de son club avec la même adresse
+      // de contact. Firebase Auth exige un email unique par compte, donc on
+      // génère automatiquement un identifiant technique dérivé (email+aliasN@…)
+      // pour CE compte de connexion, tout en gardant l'email de contact réel
+      // (celui saisi) affiché partout dans l'appli. Le mot de passe saisi doit
+      // être réutilisé pour se reconnecter plus tard avec cet identifiant.
+      const at = email.indexOf('@');
+      const local  = at>-1 ? email.slice(0,at) : email;
+      const domain = at>-1 ? email.slice(at)   : '';
+      let success = false, lastErr = e;
+      for(let i=2; i<=6 && !success; i++){
+        const altEmail = `${local}+equipe${i}${domain}`;
+        try {
+          cred = await createUserWithEmailAndPassword(auth, altEmail, pwd);
+          loginEmail = altEmail;
+          success = true;
+        } catch(e2){
+          lastErr = e2;
+          if(e2.code !== 'auth/email-already-in-use') break; // autre souci (ex: mdp faible) -> on arrête là
+        }
+      }
+      if(!success){
+        console.error('submitRegistration: création du compte (email déjà utilisé, alternatives épuisées)', lastErr);
+        setMsg(lastErr.code==='auth/email-already-in-use'
+          ? 'Cet email est déjà utilisé pour plusieurs équipes. Utilisez une autre adresse email ou contactez l\'organisation.'
+          : (errMap[lastErr.code] || `Erreur (${lastErr.code||'inconnue'}) : ${lastErr.message}`), 'red');
+        if(btn) btn.disabled = false;
+        return;
+      }
+    } else {
+      console.error('submitRegistration: création du compte', e);
+      setMsg(errMap[e.code] || `Erreur (${e.code||'inconnue'}) : ${e.message}`, 'red');
+      if(btn) btn.disabled = false;
+      return;
+    }
   }
   try {
     // Écrit immédiatement sa propre fiche 'users/{uid}' — auto-écriture par
@@ -1357,14 +1398,16 @@ window.submitRegistration = async function(){
     // avec des champs supplémentaires (teamName, club, phone, regStatus) :
     // si vos règles Firestore valident une liste stricte de champs autorisés
     // sur 'users/{uid}', il faut les y ajouter (cf. message d'erreur détaillé
-    // ci-dessous en cas d'échec).
+    // ci-dessous en cas d'échec). `loginEmail` ne diffère de `email` que
+    // lorsqu'un alias technique a dû être généré (2e équipe, même responsable).
     await setDoc(doc(db,'users',cred.user.uid), {
-      email, name: contactName, role:'registrant', tournament:'foot16',
+      email, loginEmail, name: contactName, role:'registrant', tournament:'foot16',
       teamName, club, phone, regStatus:'pending', createdAt: serverTimestamp()
     }, { merge:true });
     closeRegForm();
     // onAuthStateChanged va maintenant détecter la connexion et afficher
-    // l'écran d'attente automatiquement (cf. showRegistrantScreen).
+    // l'écran d'attente automatiquement (cf. showRegistrantScreen), avec un
+    // rappel de l'identifiant de connexion si celui-ci diffère de l'email saisi.
   } catch(e){
     console.error('submitRegistration: écriture de la fiche', e);
     // Compte créé mais fiche non enregistrée : on supprime le compte orphelin
@@ -1382,7 +1425,7 @@ window.submitRegistration = async function(){
 
 // Écran affiché à un compte 'registrant' (inscription envoyée, en attente ou
 // refusée) — jamais l'accès complet à l'appli.
-function showRegistrantScreen(regStatus, teamName){
+function showRegistrantScreen(regStatus, teamName, contactEmail, loginEmail){
   document.getElementById('loginScreen').style.display='none';
   document.getElementById('appScreen').style.display='none';
   let el = document.getElementById('registrantScreen');
@@ -1405,6 +1448,11 @@ function showRegistrantScreen(regStatus, teamName){
           ? "Votre inscription n'a malheureusement pas été retenue par l'organisation. Contactez-la pour plus de détails."
           : "Votre inscription est en attente de validation par l'organisation. Revenez plus tard pour vérifier si elle a été acceptée."}
       </div>
+      ${(loginEmail && contactEmail && loginEmail!==contactEmail) ? `
+      <div style="font-size:12px;background:#fff6da;border:1px solid #e8d488;border-radius:8px;padding:10px;margin-bottom:16px;text-align:left">
+        ⚠️ Cette adresse (<strong>${contactEmail}</strong>) était déjà utilisée pour une autre équipe. Pour vous reconnecter à <strong>cette</strong> équipe plus tard, utilisez l'identifiant :<br>
+        <strong>${loginEmail}</strong><br>(avec le mot de passe choisi à l'inscription) — notez-le, il ne sera plus rappelé automatiquement une fois déconnecté.
+      </div>` : ''}
       <button onclick="signOutRegistrant()" style="padding:9px 22px;background:#1a7a3a;color:#fff;border:none;border-radius:8px;cursor:pointer;font-family:'Oswald',sans-serif;font-size:14px">Se déconnecter</button>
     </div>`;
   el.style.display='flex';
@@ -1676,15 +1724,31 @@ function renderRegistrationsPanel(regs){
         ? `<span style="font-size:11px;font-weight:700;color:var(--grn)">✅ Validée</span>`
         : `<span style="font-size:11px;font-weight:700;color:var(--ylw)">⏳ En attente</span>`;
     const club = r.club || r.teamName;
-    const maxPerClub = ST.cfg.maxTeamsPerClub||0;
+    const clubKey = (club||'').trim().toLowerCase();
+    const globalMax = ST.cfg.maxTeamsPerClub||0;
+    const hasOverride = clubKey && Object.prototype.hasOwnProperty.call(ST.cfg.clubOverrides||{}, clubKey);
+    const override = hasOverride ? ST.cfg.clubOverrides[clubKey] : null;
+    const maxPerClub = getMaxTeamsForClub(club);
     const clubCount = countTeamsByClub(club);
     const clubFull = maxPerClub>0 && clubCount>=maxPerClub;
     const canApprove = r.regStatus==='pending' && slotsLeft>0 && !clubFull;
     const disabledTitle = clubFull ? 'Limite equipes club atteinte' : 'Plus de place disponible';
+    const clubKeyEsc = clubKey.replace(/'/g,"\\'");
+    const loginNote = (r.loginEmail && r.loginEmail !== r.email)
+      ? `<div style="font-size:10px;color:var(--dim)">🔑 connexion : ${r.loginEmail} (2e équipe même responsable)</div>` : '';
+    const clubOverrideSelect = clubKey ? `
+        <select onchange="setClubOverride('${clubKeyEsc}', this.value)" style="width:auto;font-size:11px;padding:2px 4px" title="Dérogation individuelle pour ce club (ne change pas le réglage global)">
+          <option value="" ${!hasOverride?'selected':''}>Réglage global (${globalMax>0?globalMax+' max':'illimité'})</option>
+          <option value="1" ${override===1?'selected':''}>Ce club : 1 équipe max</option>
+          <option value="2" ${override===2?'selected':''}>Ce club : 2 équipes max</option>
+          <option value="0" ${override===0?'selected':''}>Ce club : illimité</option>
+        </select>` : '';
     return `<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--bdr);font-size:13px;flex-wrap:wrap">
       <div style="flex:1;min-width:180px">
         <div style="font-weight:700;color:var(--ink)">${r.teamName||'?'} <span style="font-weight:400;color:var(--dim);font-size:11px">— ${club}${maxPerClub>0?` (${clubCount}/${maxPerClub})`:''}</span></div>
         <div style="font-size:11px;color:var(--muted)">🛡️ ${r.name||'?'} · 📧 ${r.email||'?'} · 📞 ${r.phone||'?'}</div>
+        ${loginNote}
+        ${clubOverrideSelect}
       </div>
       ${statusBadge}
       ${r.regStatus==='pending' ? `
@@ -1705,6 +1769,36 @@ function countTeamsByClub(club){
   if(!norm) return 0;
   return ST.teams.filter(t=>(t.club||'').trim().toLowerCase()===norm).length;
 }
+// Retourne la limite d'équipes applicable à CE club : sa dérogation individuelle
+// (ST.cfg.clubOverrides) si l'admin en a réglé une pour lui, sinon le réglage
+// global (ST.cfg.maxTeamsPerClub). Une dérogation à 0 = illimité POUR CE CLUB
+// (utile si le réglage global est à 1 mais qu'on veut lever la limite pour un
+// club précis, sans y toucher pour tous les autres).
+function getMaxTeamsForClub(club){
+  const norm = (club||'').trim().toLowerCase();
+  const overrides = ST.cfg.clubOverrides || {};
+  if(norm && Object.prototype.hasOwnProperty.call(overrides, norm)) return overrides[norm];
+  return ST.cfg.maxTeamsPerClub || 0;
+}
+// Enregistre (ou retire) la dérogation d'un club — appelé depuis le panneau
+// "Inscriptions". value === '' retire la dérogation (le club revient au
+// réglage global) ; sinon 0/1/2 fixe une limite propre à ce club.
+window.setClubOverride = async function(clubKey, value){
+  if(!isAdmin() || !clubKey) return;
+  const overrides = { ...(ST.cfg.clubOverrides||{}) };
+  if(value===''){ delete overrides[clubKey]; }
+  else { overrides[clubKey] = +value; }
+  ST.cfg.clubOverrides = overrides;
+  try {
+    await saveTournament({ cfg: ST.cfg });
+  } catch(e){
+    console.error('setClubOverride', e);
+    alert('Erreur lors de l\'enregistrement de la dérogation : '+e.message);
+    return;
+  }
+  loadRegistrations();
+  renderTeamsPage();
+};
 
 window.approveRegistration = async function(uid){
   if(!isAdmin()) return;
@@ -1714,9 +1808,9 @@ window.approveRegistration = async function(uid){
     if(!snap.exists()){ alert('Cette inscription est introuvable (peut-être déjà traitée).'); loadRegistrations(); return; }
     const r = snap.data();
     const club = r.club || r.teamName;
-    const maxPerClub = ST.cfg.maxTeamsPerClub||0;
+    const maxPerClub = getMaxTeamsForClub(club);
     if(maxPerClub>0 && countTeamsByClub(club)>=maxPerClub){
-      alert(`Refusé : le club "${club}" a déjà ${maxPerClub} équipe${maxPerClub>1?'s':''} inscrite${maxPerClub>1?'s':''} (limite actuelle). Vous pouvez changer cette limite dans Config, ou refuser cette inscription.`);
+      alert(`Refusé : le club "${club}" a déjà ${maxPerClub} équipe${maxPerClub>1?'s':''} inscrite${maxPerClub>1?'s':''} (limite actuelle). Vous pouvez autoriser ce club spécifiquement via le menu déroulant à côté de son nom dans ce panneau, changer le réglage global dans Config, ou refuser cette inscription.`);
       return;
     }
     const id = 't_'+Date.now()+'_'+Math.random().toString(36).slice(2,6);
@@ -2630,9 +2724,9 @@ window.addTeam = async function(){
   const respNom = document.getElementById('t_resp').value.trim();
   const respTel = document.getElementById('t_tel').value.trim();
   if(!name){ alert('Le nom de l\'équipe est obligatoire.'); return; }
-  const maxPerClub = ST.cfg.maxTeamsPerClub||0;
+  const maxPerClub = getMaxTeamsForClub(club);
   if(maxPerClub>0 && countTeamsByClub(club)>=maxPerClub){
-    alert(`Refusé : le club "${club}" a déjà ${maxPerClub} équipe${maxPerClub>1?'s':''} inscrite${maxPerClub>1?'s':''} (limite actuelle réglée dans Config).`);
+    alert(`Refusé : le club "${club}" a déjà ${maxPerClub} équipe${maxPerClub>1?'s':''} inscrite${maxPerClub>1?'s':''} (limite actuelle — réglage global ou dérogation propre à ce club, réglable dans le panneau Inscriptions).`);
     return;
   }
   const id = 't_'+Date.now()+'_'+Math.random().toString(36).slice(2,6);
@@ -4403,7 +4497,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
             <option value="1">1 équipe max</option>
             <option value="2">2 équipes max</option>
           </select>
-          <div style="font-size:10px;color:var(--dim);margin-top:3px">S'applique à l'inscription en ligne (contrôlé à la validation par l'admin) et à l'ajout manuel d'équipe.</div>
+          <div style="font-size:10px;color:var(--dim);margin-top:3px">S'applique à l'inscription en ligne (contrôlé à la validation par l'admin) et à l'ajout manuel d'équipe. C'est le réglage <strong>par défaut</strong> : vous pouvez l'outrepasser pour un club précis (ex. autoriser 2 équipes pour un seul club) depuis le panneau "📝 Inscriptions", sans changer ce réglage global.</div>
         </div>
       </div>
       <div class="fr">
