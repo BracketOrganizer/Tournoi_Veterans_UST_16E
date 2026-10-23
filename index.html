@@ -2890,18 +2890,34 @@ window.toggleTeamRefPanel = function(){
 // manque ou ce qui est devenu invalide — peut donc être relancé sans risque
 // après chaque tour de la phase finale (au fur et à mesure que les équipes
 // se déterminent).
+// Équipes qui jouent à l'horaire `time` (poules + phase finale dont les équipes sont connues)
+function teamsPlayingAtTime(time){
+  const set = new Set(); if(!time) return set;
+  ST.poolSchedule.forEach(m=>{ if(m.time===time){ set.add(m.a); set.add(m.b); } });
+  ST.bracketSchedule.forEach(b=>{ if(b.time===time){ const a=bracketTeam(b.m,'a'), c=bracketTeam(b.m,'b'); if(a) set.add(a); if(c) set.add(c); } });
+  return set;
+}
+// Liste déroulante du panneau : les équipes libres d'abord, celles qui jouent au même moment signalées ⚠️
+function teamRefOptionsHTML(options, current, time){
+  const playing = teamsPlayingAtTime(time);
+  return options.slice().sort((x,y)=>(playing.has(x.id)?1:0)-(playing.has(y.id)?1:0))
+    .map(t=>`<option value="${t.id}" ${t.id===current?'selected':''}>${t.name}${playing.has(t.id)?' ⚠️ joue à ce moment':''}</option>`).join('');
+}
+
 window.generateTeamRefereeAssignments = function(){
   if(!isAdmin()) return;
   const assignments = { ...(ST.teamRefereeAssignments||{}) };
   const refCounts = {};
   const pairSeen = {};
+  const refBusy = {}; // refBusy[horaire] = équipes déjà désignées comme arbitres à cet horaire
   ST.teams.forEach(t=>{ refCounts[t.id]=0; pairSeen[t.id]=new Set(); });
 
-  function record(refTeam, a, b){
+  function record(refTeam, a, b, time){
     if(!refTeam) return;
     refCounts[refTeam] = (refCounts[refTeam]||0)+1;
     if(!pairSeen[refTeam]) pairSeen[refTeam]=new Set();
     pairSeen[refTeam].add(a); pairSeen[refTeam].add(b);
+    if(time){ (refBusy[time] = refBusy[time] || new Set()).add(refTeam); }
   }
   function pick(eligible, a, b){
     if(!eligible.length) return null;
@@ -2913,18 +2929,27 @@ window.generateTeamRefereeAssignments = function(){
     scored.sort((x,y)=> x.conflict-y.conflict || x.count-y.count);
     return scored[0].id;
   }
+  // L'équipe arbitre ne doit pas jouer au même moment (ni arbitrer déjà un autre match à ce moment) :
+  // on choisit d'abord parmi les équipes libres ; si aucune ne l'est, on assouplit pas à pas.
+  function isFree(id, time){ return !teamsPlayingAtTime(time).has(id) && !(refBusy[time] && refBusy[time].has(id)); }
+  function pickFree(eligible, a, b, time){
+    let tier = eligible.filter(id=>isFree(id, time));
+    if(!tier.length) tier = eligible.filter(id=>!teamsPlayingAtTime(time).has(id));
+    if(!tier.length) tier = eligible;
+    return pick(tier, a, b);
+  }
 
   // 1) Phase de poules — traitée dans l'ordre des matchs
   ST.poolSchedule.slice().sort((x,y)=>(x.matchId||0)-(y.matchId||0)).forEach(m=>{
     const key = 'pool-'+m.matchId;
     const eligible = ST.teams.map(t=>t.id).filter(id=> poolOfTeam(id)!==m.pool);
     const existing = assignments[key];
-    if(existing && eligible.includes(existing) && existing!==m.a && existing!==m.b){
-      record(existing, m.a, m.b);
+    if(existing && eligible.includes(existing) && existing!==m.a && existing!==m.b && isFree(existing, m.time)){
+      record(existing, m.a, m.b, m.time);
     } else {
-      const chosen = pick(eligible, m.a, m.b);
+      const chosen = pickFree(eligible, m.a, m.b, m.time);
       assignments[key] = chosen;
-      record(chosen, m.a, m.b);
+      record(chosen, m.a, m.b, m.time);
     }
   });
 
@@ -2936,12 +2961,12 @@ window.generateTeamRefereeAssignments = function(){
     const eligible = ST.teams.map(t=>t.id).filter(id=>
       id!==teamA && id!==teamB && !teamPlaysBracketAtTime(id, b.time, key));
     const existing = assignments[key];
-    if(existing && eligible.includes(existing)){
-      record(existing, teamA, teamB);
+    if(existing && eligible.includes(existing) && isFree(existing, b.time)){
+      record(existing, teamA, teamB, b.time);
     } else {
-      const chosen = pick(eligible, teamA, teamB);
+      const chosen = pickFree(eligible, teamA, teamB, b.time);
       assignments[key] = chosen;
-      record(chosen, teamA, teamB);
+      record(chosen, teamA, teamB, b.time);
     }
   });
 
@@ -2978,7 +3003,7 @@ function renderTeamRefPanel(){
       <span style="min-width:180px">Poule ${m.pool} · ${tName(m.a)} – ${tName(m.b)} <span style="color:var(--dim)">(${m.time||''})</span></span>
       <select onchange="setTeamReferee('${key}',this.value)">
         <option value="">— aucune —</option>
-        ${options.map(t=>`<option value="${t.id}" ${t.id===current?'selected':''}>${t.name}</option>`).join('')}
+        ${teamRefOptionsHTML(options, current, m.time)}
       </select>
     </div>`;
   }).join('');
@@ -2998,7 +3023,7 @@ function renderTeamRefPanel(){
       <span style="min-width:180px">${bracketLabel(b.m)} · ${tName(teamA)} – ${tName(teamB)} <span style="color:var(--dim)">(${b.time||''})</span></span>
       <select onchange="setTeamReferee('${key}',this.value)">
         <option value="">— aucune —</option>
-        ${options.map(t=>`<option value="${t.id}" ${t.id===current?'selected':''}>${t.name}</option>`).join('')}
+        ${teamRefOptionsHTML(options, current, b.time)}
       </select>
     </div>`;
   }).join('');
@@ -3006,7 +3031,7 @@ function renderTeamRefPanel(){
   el.innerHTML = `
     <div style="margin-bottom:12px">
       <button class="btn btn-g btn-sm" onclick="generateTeamRefereeAssignments()">🔄 Générer / mettre à jour les arbitrages</button>
-      <div style="font-size:10px;color:var(--dim);margin-top:4px">Relancez ce bouton après chaque tour de phase finale pour compléter les matchs nouvellement déterminés.</div>
+      <div style="font-size:10px;color:var(--dim);margin-top:4px">L'équipe arbitre est choisie, quand c'est possible, parmi celles qui ne jouent pas au même moment. Relancez ce bouton après chaque tour de phase finale pour compléter les matchs nouvellement déterminés.</div>
     </div>
     ${ST.poolSchedule.length ? `<div style="font-weight:700;font-size:12px;margin:10px 0 6px">🏊 Phase de poules</div>${poolRows}` : ''}
     ${ST.bracketSchedule.length ? `<div style="font-weight:700;font-size:12px;margin:14px 0 6px">🏆 Phase finale</div>${bracketRows}` : ''}
@@ -3200,13 +3225,22 @@ function renderCfgForm(){
   renderBreaksList();
   onCfgChange();
 }
+// Cases « arbitres officiels » / « arbitrage tournant » : enregistrées immédiatement, pour que les boutons
+// « Gérer les arbitres » et « Arbitrage par équipe » du panneau Admin fonctionnent tout de suite.
+window.onRefFlagsChange = function(){
+  onCfgChange();
+  const rOn = !!document.getElementById('cfg_refon')?.checked, tOn = !!document.getElementById('cfg_teamrefon')?.checked;
+  if(!isAdmin()) return;
+  if(rOn !== !!ST.cfg.refereesEnabled || tOn !== !!ST.cfg.teamRefereeingEnabled){
+    ST.cfg = { ...ST.cfg, refereesEnabled: rOn, teamRefereeingEnabled: tOn };
+    saveTournament({ cfg: ST.cfg }).catch(e=>console.error('onRefFlagsChange', e));
+  }
+  try { updateRefereesBtnVisibility(); } catch(e){}
+  try { updateTeamRefBtnVisibility(); } catch(e){}
+  if(!rOn){ const p=document.getElementById('refereesPanel'); if(p) p.style.display='none'; }
+  if(!tOn){ const p=document.getElementById('teamRefPanel'); if(p) p.style.display='none'; }
+};
 window.onCfgChange = function(){
-  // « Gérer les arbitres » / « Arbitrage par équipe » : accessibles seulement si la case correspondante est cochée
-  { const rOn=!!document.getElementById('cfg_refon')?.checked, tOn=!!document.getElementById('cfg_teamrefon')?.checked;
-    const b1=document.getElementById('refArbitresBtn'), b2=document.getElementById('teamRefBtn');
-    if(b1) b1.style.display = rOn ? '' : 'none'; if(b2) b2.style.display = tOn ? '' : 'none';
-    if(!rOn){ const p=document.getElementById('refereesPanel'); if(p) p.style.display='none'; }
-    if(!tOn){ const p=document.getElementById('teamRefPanel'); if(p) p.style.display='none'; } }
   toggleRefPerCourtVisibility();
   const n = +(document.getElementById('cfg_n')?.value||16);
   const courts = +(document.getElementById('cfg_courts')?.value||4);
@@ -5723,11 +5757,11 @@ label[for="cfg_refon"], label[for="cfg_teamrefon"]{ font-size:14px!important; te
       </div>
       <div class="fr">
         <div style="display:flex;align-items:center;gap:8px;padding-top:6px">
-          <input type="checkbox" id="cfg_refon" style="width:auto" oninput="onCfgChange()">
+          <input type="checkbox" id="cfg_refon" style="width:auto" oninput="onRefFlagsChange()">
           <label for="cfg_refon" style="margin:0;cursor:pointer">🧑‍⚖️ Activer les arbitres officiels</label>
         </div>
         <div style="display:flex;align-items:center;gap:8px;padding-top:6px">
-          <input type="checkbox" id="cfg_teamrefon" style="width:auto" oninput="onCfgChange()">
+          <input type="checkbox" id="cfg_teamrefon" style="width:auto" oninput="onRefFlagsChange()">
           <label for="cfg_teamrefon" style="margin:0;cursor:pointer">⚽ Activer l'arbitrage tournant par les équipes</label>
         </div>
         <div style="font-size:10px;color:var(--dim);padding-left:26px;max-width:520px">Poules : arbitrée par une équipe d'une <strong>autre poule</strong>. Phase finale : arbitrée par une équipe <strong>libre à cet horaire</strong>. Jamais sa propre équipe, rotation équilibrée automatique (réglable ensuite).</div>
